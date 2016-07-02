@@ -127,6 +127,9 @@ static int mmc_host_runtime_resume(struct device *dev)
 	}
 
 	if (host->card && !ret && mmc_card_cmdq(host->card)) {
+		mmc_host_clk_hold(host);
+		host->cmdq_ops->enable(host);
+		mmc_host_clk_release(host);
 		ret = mmc_cmdq_halt(host, false);
 		if (ret)
 			pr_err("%s: un-halt: failed: %d\n", __func__, ret);
@@ -183,14 +186,19 @@ static int mmc_host_suspend(struct device *dev)
 			       __func__, ret);
 		/* reset CQE state if host suspend fails */
 		if (ret < 0 && host->card && host->card->cmdq_init) {
+			int err = 0;
 			mmc_card_clr_suspended(host->card);
 			mmc_host_clk_hold(host);
 			host->cmdq_ops->enable(host);
 			mmc_host_clk_release(host);
-			ret = mmc_cmdq_halt(host, false);
-			if (ret) {
+			err = mmc_cmdq_halt(host, false);
+			if (err) {
 				mmc_release_host(host);
-				pr_err("%s: halt: failed: %d\n", __func__, ret);
+				pr_err("%s: halt: failed: %d\n",
+						__func__, err);
+#ifdef CONFIG_MACH_SONY_SUZU
+				ret = err;
+#endif
 				goto out;
 			}
 		}
@@ -210,10 +218,15 @@ static int mmc_host_suspend(struct device *dev)
 		spin_unlock_irqrestore(&host->clk_lock, flags);
 		mmc_set_ios(host);
 	}
-	spin_lock_irqsave(&host->clk_lock, flags);
-	host->dev_status = DEV_SUSPENDED;
-	spin_unlock_irqrestore(&host->clk_lock, flags);
 out:
+	spin_lock_irqsave(&host->clk_lock, flags);
+#ifndef CONFIG_MACH_SONY_SUZU
+	if (ret)
+		host->dev_status = DEV_RESUMED;
+	else
+#endif
+		host->dev_status = DEV_SUSPENDED;
+	spin_unlock_irqrestore(&host->clk_lock, flags);
 	return ret;
 }
 
@@ -231,6 +244,9 @@ static int mmc_host_resume(struct device *dev)
 			pr_err("%s: %s: failed: ret: %d\n", mmc_hostname(host),
 			       __func__, ret);
 		} else if (host->card && mmc_card_cmdq(host->card)) {
+			mmc_host_clk_hold(host);
+			host->cmdq_ops->enable(host);
+			mmc_host_clk_release(host);
 			ret = mmc_cmdq_halt(host, false);
 			if (ret)
 				pr_err("%s: un-halt: failed: %d\n",
@@ -685,6 +701,9 @@ struct mmc_host *mmc_alloc_host(int extra, struct device *dev)
 
 	spin_lock_init(&host->lock);
 	init_waitqueue_head(&host->wq);
+#ifdef CONFIG_MMC_BLOCK_DEFERRED_RESUME
+	init_waitqueue_head(&host->defer_wq);
+#endif
 	host->wlock_name = kasprintf(GFP_KERNEL,
 			"%s_detect", mmc_hostname(host));
 	wake_lock_init(&host->detect_wake_lock, WAKE_LOCK_SUSPEND,

@@ -62,8 +62,6 @@ static const char *const mpeg_video_vidc_extradata[] = {
 	"Extradata Frame Rate",
 	"Extradata Panscan Window",
 	"Extradata Recovery point SEI",
-	"Extradata Closed Caption UD",
-	"Extradata AFD UD",
 	"Extradata Multislice info",
 	"Extradata number of concealed MB",
 	"Extradata metadata filler",
@@ -71,6 +69,10 @@ static const char *const mpeg_video_vidc_extradata[] = {
 	"Extradata digital zoom",
 	"Extradata aspect ratio",
 	"Extradata mpeg2 seqdisp",
+	"Extradata UD",
+	"Extradata frame QP",
+	"Extradata frame bits info",
+	"Extradata display VUI",
 };
 static const char *const mpeg_vidc_video_alloc_mode_type[] = {
 	"Buffer Allocation Static",
@@ -263,7 +265,7 @@ static struct msm_vidc_ctrl msm_vdec_ctrls[] = {
 		.name = "Extradata Type",
 		.type = V4L2_CTRL_TYPE_MENU,
 		.minimum = V4L2_MPEG_VIDC_EXTRADATA_NONE,
-		.maximum = V4L2_MPEG_VIDC_EXTRADATA_FRAME_BITS_INFO,
+		.maximum = V4L2_MPEG_VIDC_EXTRADATA_VUI_DISPLAY,
 		.default_value = V4L2_MPEG_VIDC_EXTRADATA_NONE,
 		.menu_skip_mask = ~(
 			(1 << V4L2_MPEG_VIDC_EXTRADATA_NONE) |
@@ -285,7 +287,8 @@ static struct msm_vidc_ctrl msm_vdec_ctrls[] = {
 			(1 << V4L2_MPEG_VIDC_EXTRADATA_MPEG2_SEQDISP) |
 			(1 << V4L2_MPEG_VIDC_EXTRADATA_STREAM_USERDATA) |
 			(1 << V4L2_MPEG_VIDC_EXTRADATA_FRAME_QP) |
-			(1 << V4L2_MPEG_VIDC_EXTRADATA_FRAME_BITS_INFO)
+			(1 << V4L2_MPEG_VIDC_EXTRADATA_FRAME_BITS_INFO) |
+			(1 << V4L2_MPEG_VIDC_EXTRADATA_VUI_DISPLAY)
 			),
 		.qmenu = mpeg_video_vidc_extradata,
 		.step = 0,
@@ -2054,6 +2057,8 @@ int msm_vdec_inst_init(struct msm_vidc_inst *inst)
 	inst->buffer_mode_set[OUTPUT_PORT] = HAL_BUFFER_MODE_STATIC;
 	inst->buffer_mode_set[CAPTURE_PORT] = HAL_BUFFER_MODE_STATIC;
 	inst->prop.fps = 30;
+	inst->operating_rate = 0;
+
 	return rc;
 }
 
@@ -2557,9 +2562,25 @@ static int try_set_ctrl(struct msm_vidc_inst *inst, struct v4l2_ctrl *ctrl)
 		property_id = HAL_CONFIG_REALTIME;
 		hal_property.enable = ctrl->val;
 		pdata = &hal_property;
+		switch (ctrl->val) {
+		case V4L2_MPEG_VIDC_VIDEO_PRIORITY_REALTIME_DISABLE:
+			inst->flags &= ~VIDC_REALTIME;
+			break;
+		case V4L2_MPEG_VIDC_VIDEO_PRIORITY_REALTIME_ENABLE:
+			inst->flags |= VIDC_REALTIME;
+			break;
+		default:
+			dprintk(VIDC_WARN,
+				"invalid ctrl value 0x%x\n", ctrl->val);
+			break;
+		}
 		break;
 	case V4L2_CID_MPEG_VIDC_VIDEO_OPERATING_RATE:
 		property_id = 0;
+		inst->operating_rate = ctrl->val;
+		dprintk(VIDC_DBG, "inst(%p) operating rate changed to %d",
+			inst, inst->operating_rate >> 16);
+		msm_comm_scale_clocks_and_bus(inst);
 		break;
 	default:
 		break;

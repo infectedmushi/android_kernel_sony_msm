@@ -102,6 +102,7 @@ struct sdhci_msm_pltfm_data {
 	u32 *cpu_dma_latency_us;
 	unsigned int cpu_dma_latency_tbl_sz;
 	int status_gpio; /* card detection GPIO that is configured as IRQ */
+	int uim2_gpio;
 	struct sdhci_msm_bus_voting_data *voting_data;
 	u32 *sup_clk_table;
 	unsigned char sup_clk_cnt;
@@ -114,6 +115,9 @@ struct sdhci_msm_pltfm_data {
 	u32 ice_clk_max;
 	u32 ice_clk_min;
 	bool core_3_0v_support;
+#ifdef CONFIG_WIFI_CONTROL_FUNC
+	bool use_for_wifi;
+#endif
 };
 
 struct sdhci_msm_bus_vote {

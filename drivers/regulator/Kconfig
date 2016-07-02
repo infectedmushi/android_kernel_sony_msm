@@ -600,6 +600,12 @@ config REGULATOR_QPNP_LABIBB
 	  negative boost regulator. LAB/IBB regulators can also be used
 	  together for LCD or AMOLED.
 
+config REGULATOR_QPNP_LABIBB_SOMC
+	bool "QPNP LAB/IBB SoMC implementation"
+	depends on REGULATOR_QPNP_LABIBB
+	help
+	  Say Y here to use SoMC QPNP LAB/IBB implementation in QTI driver.
+
 config REGULATOR_SPM
 	bool "SPM regulator driver"
 	depends on SPMI && OF_SPMI
@@ -628,5 +634,10 @@ config REGULATOR_CPR2_GFX
 	  graphics (GFX) rail. The GFX CPR2 controller monitors the graphics voltage
 	  requirements. This driver reads initial voltage values out of hardware
 	  fuses and CPR target quotient values out of device tree.
+
+config SOMC_LCD_OCP_ENABLED
+	bool "SoMC LCD OCP function"
+	help
+	  Select this to enable SoMC LCD Over current protection function.
 endif
 

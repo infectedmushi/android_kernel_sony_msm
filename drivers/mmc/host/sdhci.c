@@ -606,6 +606,9 @@ static int sdhci_pre_dma_transfer(struct sdhci_host *host,
 				  struct sdhci_next *next)
 {
 	int sg_count;
+	unsigned long flags;
+
+	spin_lock_irqsave(&host->next_lock, flags);
 
 	if (!next && data->host_cookie &&
 	    data->host_cookie != host->next_data.cookie) {
@@ -627,14 +630,18 @@ static int sdhci_pre_dma_transfer(struct sdhci_host *host,
 		host->next_data.sg_count = 0;
 	}
 
-	if (sg_count == 0)
+	if (sg_count == 0) {
+		spin_unlock_irqrestore(&host->next_lock, flags);
 		return -EINVAL;
+	}
 
 	if (next) {
 		next->sg_count = sg_count;
 		data->host_cookie = ++next->cookie < 0 ? 1 : next->cookie;
 	} else
 		host->sg_count = sg_count;
+
+	spin_unlock_irqrestore(&host->next_lock, flags);
 
 	return sg_count;
 }
@@ -2993,10 +3000,13 @@ static void sdhci_timeout_timer(unsigned long data)
 		if (!host->mrq->cmd->ignore_timeout) {
 			pr_err("%s: Timeout waiting for hardware interrupt.\n",
 			       mmc_hostname(host->mmc));
-			if (host->data)
+			if (host->data) {
 				sdhci_show_adma_error(host);
-			else
-				sdhci_dumpregs(host);
+			} else {
+				if (host->mmc->card &&
+						!mmc_card_sdio(host->mmc->card))
+					sdhci_dumpregs(host);
+			}
 		}
 
 		if (host->data) {
@@ -3718,6 +3728,7 @@ struct sdhci_host *sdhci_alloc_host(struct device *dev,
 	host->mmc = mmc;
 
 	spin_lock_init(&host->lock);
+	spin_lock_init(&host->next_lock);
 	mutex_init(&host->ios_mutex);
 	ratelimit_state_init(&host->dbg_dump_rs, SDHCI_DBG_DUMP_RS_INTERVAL,
 			SDHCI_DBG_DUMP_RS_BURST);

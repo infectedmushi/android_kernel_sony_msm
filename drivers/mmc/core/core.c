@@ -38,6 +38,8 @@
 #include <linux/mmc/mmc.h>
 #include <linux/mmc/sd.h>
 
+#include <linux/mmc/slot-gpio.h>
+
 #include "core.h"
 #include "bus.h"
 #include "host.h"
@@ -459,7 +461,8 @@ void mmc_start_delayed_bkops(struct mmc_card *card)
 		return;
 
 	if (card->bkops_info.sectors_changed <
-	    card->bkops_info.min_sectors_to_queue_delayed_work)
+	    card->bkops_info.min_sectors_to_queue_delayed_work &&
+	    !mmc_card_need_bkops(card))
 		return;
 
 	pr_debug("%s: %s: queueing delayed_bkops_work\n",
@@ -540,6 +543,8 @@ void mmc_start_bkops(struct mmc_card *card, bool from_exception)
 			       mmc_hostname(card->host), __func__, err);
 			goto out;
 		}
+
+		card->bkops_info.sectors_changed = 0;
 
 		if (!card->ext_csd.raw_bkops_status)
 			goto out;
@@ -1443,7 +1448,15 @@ int mmc_read_bkops_status(struct mmc_card *card)
 	}
 
 	mmc_claim_host(card->host);
-	err = mmc_send_ext_csd(card, ext_csd);
+	if (mmc_card_cmdq(card))
+		err = mmc_cmdq_halt_on_empty_queue(card->host);
+
+	if (!err) {
+		err = mmc_send_ext_csd(card, ext_csd);
+
+		if (mmc_card_cmdq(card))
+			mmc_cmdq_halt(card->host, false);
+	}
 	mmc_release_host(card->host);
 	if (err)
 		goto out;
@@ -2176,7 +2189,14 @@ int mmc_set_signal_voltage(struct mmc_host *host, int signal_voltage)
 
 	host->card_clock_off = false;
 	/* Wait for at least 1 ms according to spec */
-	mmc_delay(1);
+#ifndef CONFIG_MMC_SUPPORT_SVS_INTERVAL
+ 	mmc_delay(1);
+#else
+	if (host->caps & MMC_CAP_NONREMOVABLE)
+		mmc_delay(1);
+	else
+		mmc_delay(40);
+#endif
 
 	/*
 	 * Failure to switch is indicated by the card holding
@@ -2364,6 +2384,37 @@ static inline void mmc_bus_put(struct mmc_host *host)
 	spin_unlock_irqrestore(&host->lock, flags);
 }
 
+#ifdef CONFIG_MMC_BLOCK_DEFERRED_RESUME
+static int mmc_resume_bus_sync(struct mmc_host *host)
+{
+	DECLARE_WAITQUEUE(wait, current);
+	unsigned long flags;
+
+	if (!mmc_bus_is_resuming(host))
+		return 0;
+
+	might_sleep();
+
+	add_wait_queue(&host->defer_wq, &wait);
+
+	spin_lock_irqsave(&host->lock, flags);
+	while (1) {
+		set_current_state(TASK_UNINTERRUPTIBLE);
+		if (!mmc_bus_is_resuming(host))
+			break;
+		spin_unlock_irqrestore(&host->lock, flags);
+		schedule();
+		spin_lock_irqsave(&host->lock, flags);
+	}
+	set_current_state(TASK_RUNNING);
+	spin_unlock_irqrestore(&host->lock, flags);
+
+	remove_wait_queue(&host->defer_wq, &wait);
+
+	return 0;
+}
+#endif
+
 int mmc_resume_bus(struct mmc_host *host)
 {
 	unsigned long flags;
@@ -2374,17 +2425,28 @@ int mmc_resume_bus(struct mmc_host *host)
 	printk("%s: Starting deferred resume\n", mmc_hostname(host));
 	spin_lock_irqsave(&host->lock, flags);
 	host->bus_resume_flags &= ~MMC_BUSRESUME_NEEDS_RESUME;
+	host->bus_resume_flags |= MMC_BUSRESUME_IS_RESUMING;
+
 	host->rescan_disable = 0;
 	spin_unlock_irqrestore(&host->lock, flags);
 
 	mmc_bus_get(host);
 	if (host->bus_ops && !host->bus_dead) {
 		mmc_power_up(host);
+		mmc_select_voltage(host, host->ocr);
 		BUG_ON(!host->bus_ops->resume);
 		host->bus_ops->resume(host);
 	}
 
+	spin_lock_irqsave(&host->lock, flags);
+	host->bus_resume_flags &= ~MMC_BUSRESUME_IS_RESUMING;
+#ifdef CONFIG_MMC_BLOCK_DEFERRED_RESUME
+	wake_up(&host->defer_wq);
+#endif
+	spin_unlock_irqrestore(&host->lock, flags);
+
 	mmc_bus_put(host);
+	mmc_detect_change(host, 0);
 	printk("%s: Deferred resume completed\n", mmc_hostname(host));
 	return 0;
 }
@@ -3700,6 +3762,8 @@ static int mmc_rescan_try_freq(struct mmc_host *host, unsigned freq)
 		return 0;
 	if (!mmc_attach_sd(host))
 		return 0;
+	else
+		mmc_gpio_tray_close_set_uim2(host, 1);
 	if (!mmc_attach_mmc(host))
 		return 0;
 
@@ -3788,6 +3852,9 @@ void mmc_rescan(struct work_struct *work)
 	if ((host->caps & MMC_CAP_NONREMOVABLE) && host->rescan_entered)
 		return;
 	host->rescan_entered = 1;
+#ifdef CONFIG_MMC_BLOCK_DEFERRED_RESUME
+	host->rescan_exec_flag = 1;
+#endif
 
 	mmc_bus_get(host);
 	mmc_rpm_hold(host, &host->class_dev);
@@ -3849,6 +3916,10 @@ void mmc_rescan(struct work_struct *work)
 
 	if (host->caps & MMC_CAP_NEEDS_POLL)
 		mmc_schedule_delayed_work(&host->detect, HZ);
+
+#ifdef CONFIG_MMC_BLOCK_DEFERRED_RESUME
+	host->rescan_exec_flag = 0;
+#endif
 }
 
 void mmc_start_host(struct mmc_host *host)
@@ -3877,6 +3948,8 @@ void mmc_stop_host(struct mmc_host *host)
 	cancel_delayed_work_sync(&host->detect);
 
 	mmc_flush_scheduled_work();
+
+	mmc_gpio_set_uim2_en(host, 0);
 
 	/* clear pm flags now and let card drivers set them as needed */
 	host->pm_flags = 0;
@@ -4035,6 +4108,60 @@ int mmc_flush_cache(struct mmc_card *card)
 	return err;
 }
 EXPORT_SYMBOL(mmc_flush_cache);
+
+/*
+ * Turn the cache ON/OFF.
+ * Turning the cache OFF shall trigger flushing of the data
+ * to the non-volatile storage.
+ * This function should be called with host claimed
+ */
+int mmc_cache_ctrl(struct mmc_host *host, u8 enable)
+{
+	struct mmc_card *card = host->card;
+	unsigned int timeout;
+	int err = 0, rc;
+
+	BUG_ON(!card);
+	timeout = card->ext_csd.generic_cmd6_time;
+
+	if (!(host->caps2 & MMC_CAP2_CACHE_CTRL) ||
+			mmc_card_is_removable(host) ||
+			(card->quirks & MMC_QUIRK_CACHE_DISABLE))
+		return err;
+
+	if (card && mmc_card_mmc(card) &&
+			(card->ext_csd.cache_size > 0)) {
+		enable = !!enable;
+
+		if (card->ext_csd.cache_ctrl ^ enable) {
+			if (!enable)
+				timeout = MMC_FLUSH_REQ_TIMEOUT_MS;
+
+			err = mmc_switch_ignore_timeout(card,
+					EXT_CSD_CMD_SET_NORMAL,
+					EXT_CSD_CACHE_CTRL, enable, timeout);
+
+			if (err == -ETIMEDOUT && !enable) {
+				pr_err("%s:cache disable operation timeout\n",
+						mmc_hostname(card->host));
+				rc = mmc_interrupt_hpi(card);
+				if (rc)
+					pr_err("%s: mmc_interrupt_hpi() failed (%d)\n",
+							mmc_hostname(host), rc);
+			} else if (err) {
+				pr_err("%s: cache %s error %d\n",
+						mmc_hostname(card->host),
+						enable ? "on" : "off",
+						err);
+			} else {
+				card->ext_csd.cache_ctrl = enable;
+			}
+		}
+	}
+
+	return err;
+}
+EXPORT_SYMBOL(mmc_cache_ctrl);
 
 #ifdef CONFIG_PM
 
@@ -4209,6 +4336,9 @@ int mmc_pm_notify(struct notifier_block *notify_block,
 		notify_block, struct mmc_host, pm_notify);
 	unsigned long flags;
 	int err = 0;
+#ifdef CONFIG_MMC_BLOCK_DEFERRED_RESUME
+	bool pending_detect = false;
+#endif
 
 	switch (mode) {
 	case PM_HIBERNATION_PREPARE:
@@ -4234,6 +4364,11 @@ int mmc_pm_notify(struct notifier_block *notify_block,
 		host->rescan_disable = 1;
 		spin_unlock_irqrestore(&host->lock, flags);
 
+#ifdef CONFIG_MMC_BLOCK_DEFERRED_RESUME
+		if (host->rescan_exec_flag)
+			pending_detect = true;
+#endif
+
 		/* Wait for pending detect work to be completed */
 		if (!(host->caps & MMC_CAP_NEEDS_POLL))
 			flush_work(&host->detect.work);
@@ -4243,7 +4378,19 @@ int mmc_pm_notify(struct notifier_block *notify_block,
 		 * just before rescan_disable is set to true.
 		 * Cancel such the scheduled works.
 		 */
-		cancel_delayed_work_sync(&host->detect);
+		if (cancel_delayed_work_sync(&host->detect)) {
+#ifdef CONFIG_MMC_BLOCK_DEFERRED_RESUME
+			/*
+			 * In case of a deferred resume, we might end up not
+			 * running mmc_detect_change on resume so we cannot
+			 * safely ignore scheduled card redetection
+			 */
+			pending_detect = true;
+#endif
+		}
+#ifdef CONFIG_MMC_BLOCK_DEFERRED_RESUME
+		mmc_cd_prepare_suspend(host, pending_detect);
+#endif
 
 		/*
 		 * It is possible that the wake-lock has been acquired, since
@@ -4277,6 +4424,10 @@ int mmc_pm_notify(struct notifier_block *notify_block,
 			break;
 		}
 		spin_unlock_irqrestore(&host->lock, flags);
+#ifdef CONFIG_MMC_BLOCK_DEFERRED_RESUME
+		if (!mmc_cd_is_pending_detect(host))
+			break; /* IRQ should be triggered if CD changed */
+#endif
 		mmc_detect_change(host, 0);
 		break;
 
@@ -4318,6 +4469,12 @@ void mmc_rpm_hold(struct mmc_host *host, struct device *dev)
 		if (pm_runtime_suspended(dev))
 			BUG_ON(1);
 	}
+#ifdef CONFIG_MMC_BLOCK_DEFERRED_RESUME
+	if (mmc_bus_manual_resume(host))
+		mmc_resume_bus_sync(host);
+	if (mmc_bus_needs_resume(host))
+		mmc_resume_bus(host);
+#endif
 }
 
 EXPORT_SYMBOL(mmc_rpm_hold);
