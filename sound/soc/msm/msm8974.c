@@ -175,7 +175,7 @@ static void param_set_mask(struct snd_pcm_hw_params *p, int n, unsigned bit)
 	}
 }
 
-static const char *const auxpcm_rate_text[] = {"rate_8000", "rate_16000"};
+static const char *const auxpcm_rate_text[] = {"8000", "16000"};
 static const struct soc_enum msm8974_auxpcm_enum[] = {
 		SOC_ENUM_SINGLE_EXT(2, auxpcm_rate_text),
 };
@@ -1821,11 +1821,15 @@ static int msm_audrx_init(struct snd_soc_pcm_runtime *rtd)
 
 	snd_soc_dapm_sync(dapm);
 
-	codec_clk = clk_get(cpu_dai->dev, "osr_clk");
+	codec_clk = clk_get(&spdev->dev, "osr_clk");
+	if (IS_ERR(codec_clk)) {
+		pr_err("%s: error clk_get %lu\n",
+			__func__, PTR_ERR(codec_clk));
+		return -EINVAL;
+	}
 
 	snd_soc_dai_set_channel_map(codec_dai, ARRAY_SIZE(tx_ch),
 				    tx_ch, ARRAY_SIZE(rx_ch), rx_ch);
-
 
 	err = msm_afe_set_config(codec);
 	if (err) {
@@ -2169,10 +2173,10 @@ static struct snd_soc_dai_link msm8974_common_dai_links[] = {
 		.be_id = MSM_FRONTEND_DAI_VOIP,
 	},
 	{
-		.name = "MSM8974 LPA",
-		.stream_name = "LPA",
-		.cpu_dai_name	= "MultiMedia3",
-		.platform_name  = "msm-pcm-lpa",
+		.name = "MSM8974 ULL",
+		.stream_name = "MultiMedia3",
+		.cpu_dai_name = "MultiMedia3",
+		.platform_name = "msm-pcm-dsp.2",
 		.dynamic = 1,
 		.trigger = {SND_SOC_DPCM_TRIGGER_POST,
 			SND_SOC_DPCM_TRIGGER_POST},
@@ -2949,6 +2953,7 @@ static struct snd_soc_dai_link msm8974_common_dai_links[] = {
 		.no_pcm = 1,
 		.be_id = MSM_BACKEND_DAI_SLIMBUS_5_TX,
 		.be_hw_params_fixup = msm_slim_5_tx_be_hw_params_fixup,
+		.ignore_suspend = 1,
 		.ops = &msm8974_be_ops,
 	},
 #ifdef CONFIG_MACH_SONY_SHINANO

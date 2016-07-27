@@ -412,6 +412,10 @@ void mdss_dsi_host_init(struct mdss_panel_data *pdata)
 	MIPI_OUTP((ctrl_pdata->ctrl_base) + 0x11c,
 					0x23f); /* DSI_CLK_CTRL */
 
+	/* Reset DSI_LANE_CTRL */
+	if (!ctrl_pdata->mmss_clamp)
+		MIPI_OUTP((ctrl_pdata->ctrl_base) + 0x00ac, 0x0);
+
 	dsi_ctrl |= BIT(0);	/* enable dsi */
 	MIPI_OUTP((ctrl_pdata->ctrl_base) + 0x0004, dsi_ctrl);
 
@@ -1966,28 +1970,27 @@ static int mdss_dsi_cmd_dma_tx(struct mdss_dsi_ctrl_pdata *ctrl,
 
 	ret = wait_for_completion_timeout(&ctrl->dma_comp,
 				msecs_to_jiffies(DMA_TX_TIMEOUT));
-
-	if (ret <= 0) {
-		u32 reg_val, status, mask;
+	if (ret == 0) {
+		u32 reg_val, status;
 
 		reg_val = MIPI_INP(ctrl->ctrl_base + 0x0110);/* DSI_INTR_CTRL */
-		mask = reg_val & DSI_INTR_CMD_DMA_DONE_MASK;
-		status = mask & reg_val;
+		status = reg_val & DSI_INTR_CMD_DMA_DONE;
 		if (status) {
-			pr_warn("dma tx done but irq not triggered\n");
 			reg_val &= DSI_INTR_MASK_ALL;
 			/* clear CMD DMA isr only */
 			reg_val |= DSI_INTR_CMD_DMA_DONE;
 			MIPI_OUTP(ctrl->ctrl_base + 0x0110, reg_val);
-			mdss_dsi_disable_irq_nosync(ctrl, DSI_MDP_TERM);
+			mdss_dsi_disable_irq_nosync(ctrl, DSI_CMD_TERM);
 			complete(&ctrl->dma_comp);
-			ret = 1;
+
+			pr_warn("%s: dma tx done but irq not triggered\n",
+				__func__);
+		} else {
+			ret = -ETIMEDOUT;
 		}
 	}
 
-	if (ret == 0)
-		ret = -ETIMEDOUT;
-	else
+	if (!IS_ERR_VALUE(ret))
 		ret = tp->len;
 
 	if (mctrl && mctrl->dma_addr) {
