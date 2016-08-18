@@ -258,6 +258,7 @@ static struct device_attribute power_supply_attrs[] = {
 	POWER_SUPPLY_ATTR(lrc_not_startup),
 	POWER_SUPPLY_ATTR(max_charge_current),
 	POWER_SUPPLY_ATTR(int_cld),
+
 	/* Local extensions of type int64_t */
 	POWER_SUPPLY_ATTR(charge_counter_ext),
 	/* Properties of type `const char *' */
